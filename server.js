@@ -8,8 +8,10 @@ const catalog = require("./catalog-data");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4242;
-const ordersFile = path.join(__dirname, "orders.json");
-const newsletterFile = path.join(__dirname, "newsletter.json");
+const publicDir = path.join(__dirname, "public");
+const dataDir = process.env.VERCEL ? path.join("/tmp", "dapor") : __dirname;
+const ordersFile = path.join(dataDir, "orders.json");
+const newsletterFile = path.join(dataDir, "newsletter.json");
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const newsletterHits = new Map();
 
@@ -28,20 +30,24 @@ function originFrom(req) {
   if (configured) {
     try {
       const parsed = new URL(configured);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return `http://localhost:${PORT}`;
+      const configuredHost = parsed.hostname;
+      const configuredIsLocal = configuredHost === "localhost" || configuredHost === "127.0.0.1";
+      if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !configuredIsLocal) {
+        return `${parsed.protocol}//${parsed.host}`;
       }
-      return `${parsed.protocol}//${parsed.host}`;
     } catch {
-      return `http://localhost:${PORT}`;
+      // Fall through and use the request host.
     }
   }
-  const host = String(req.get("host") || "");
-  if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host)) {
-    return `http://localhost:${PORT}`;
+  const host = String(req.get("host") || "").toLowerCase();
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  const live = /^[a-z0-9.-]+(:\d+)?$/.test(host) && host.includes(".") && !host.includes("..");
+  if (local) {
+    const proto = req.protocol === "https" ? "https" : "http";
+    return `${proto}://${host}`;
   }
-  const proto = req.protocol === "https" ? "https" : "http";
-  return `${proto}://${host}`;
+  if (live) return `https://${host}`;
+  return `http://localhost:${PORT}`;
 }
 
 function sanitizeCancelPath(value) {
@@ -65,6 +71,7 @@ function readJsonArray(file) {
 }
 
 function writeJsonArray(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
@@ -338,7 +345,7 @@ app.get("/api/checkout-session", async (req, res) => {
 
 app.get(["/products/:slug", "/products/:slug/"], (req, res, next) => {
   if (!publicSlug(req.params.slug)) return next();
-  const productsRoot = path.resolve(__dirname, "products");
+  const productsRoot = path.resolve(publicDir, "products");
   const file = path.resolve(productsRoot, req.params.slug, "index.html");
   const relative = path.relative(productsRoot, file);
   if (relative.startsWith("..") || path.isAbsolute(relative) || !fs.existsSync(file)) return next();
@@ -347,13 +354,13 @@ app.get(["/products/:slug", "/products/:slug/"], (req, res, next) => {
 
 ["men", "women", "kids", "accessories"].forEach((slug) => {
   app.get([`/${slug}`, `/${slug}/`], (req, res, next) => {
-    const file = path.join(__dirname, slug, "index.html");
+    const file = path.join(publicDir, slug, "index.html");
     if (fs.existsSync(file)) return res.sendFile(file);
     next();
   });
 });
 
-app.use(express.static(__dirname, {
+app.use(express.static(publicDir, {
   dotfiles: "deny",
   index: ["index.html"],
   fallthrough: true,
@@ -374,6 +381,10 @@ app.use((error, req, res, next) => {
   next(error);
 });
 
-app.listen(PORT, () => {
-  console.log(`DA’POR store running at http://localhost:${PORT}`);
-});
+module.exports = app;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`DA’POR store running at http://localhost:${PORT}`);
+  });
+}
